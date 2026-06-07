@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard</title>
+  </head>
+  <body>
+    <h1>Dashboard</h1>
+    <form action="/add" method="POST">
+      <label for="key">Key:</label>
+      <input type="text" id="key" name="key" required />
+      <label for="target">Target:</label>
+      <input type="text" id="target" name="target" required />
+      <button type="submit">Add</button>
+    </form>
+
+    <table>
+      <tr>
+        <th>Key</th>
+        <th>Target</th>
+        <th>Actions</th>
+      </tr>
+      {{#entries}}
+      <tr>
+        <td><strong>{{key}}</strong></td>
+        <td>{{target}}</td>
+        <td>
+          <a href="/delete/{{key}}">Delete</a>
+          <a href="/edit/{{key}}">Edit</a>
+        </td>
+      </tr>
+      {{/entries}} {{^entries}}
+      <tr>
+        <td colspan="3">No entries yet.</td>
+      </tr>
+      {{/entries}}
+    </table>
+  </body>
+</html>
