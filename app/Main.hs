@@ -5,37 +5,33 @@
 import Web.Scotty
     ( formParam,
       get,
-      headers,
       html,
+      middleware,
       pathParam,
       post,
       redirect,
-      request,
       scotty,
+      setHeader,
       status,
       text,
       liftIO,
       ActionM )
 import Network.Wai.Middleware.HttpAuth
+import Network.Wai (Request, pathInfo, remoteHost, Application, Middleware)
 import Data.ByteString (ByteString)
-import Data.SecureMem -- for constant-time comparison
-import Network.HTTP.Types (status401, status404)
-import GHC.Generics
-import Data.Aeson (FromJSON, object, KeyValue ((.=)))
-import Data.Text.Lazy (pack, Text)
+import Network.HTTP.Types (status404)
+import Data.Aeson (KeyValue ((.=)))
+import Data.Text.Lazy (pack)
 import qualified Data.Text.Lazy as TL
-import qualified GHC.List as T
-import Data.Map.Strict (Map)
-import qualified Data.Map as Map
-import Data.Hashable (hash)
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as Map
 import Control.Monad.IO.Class (liftIO)
 import Network.Wai (remoteHost)
 import Network.Socket (SockAddr)
-import Control.Monad.IO.Class (liftIO)
 import Database.SQLite.Simple
 import Database.SQLite.Simple.FromRow
+import Database.SQLite.Simple (Only(..))
 import Data.IORef
-import System.Posix.Internals (c_close)
 import qualified Data.Aeson as Aeson
 import Text.Mustache
 
@@ -54,31 +50,27 @@ main = do
 
     close conn
 
+    conn <- open "sessions.db"
+
+    execute_ conn
+        "CREATE TABLE IF NOT EXISTS sessions (\
+        \    key TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),\
+        \    user_cookie TEXT NOT NULL,\
+        \    created_at TEXT DEFAULT CURRENT_TIMESTAMP\
+        \)"
+    
+    close conn
+
     entries <- liftIO loadDB
     let initialMap = generateHashMap entries
     mapBox <- newIORef initialMap
 
 
-    scotty 3000 $ do
+    scotty 3001 $ do
 
-        get "/go/:path" $ do
-            target <- pathParam "path"
-            allHeaders <- headers
+        middleware $ basicAuth checkCreds "url-shortener" `guardPath` isProtected
 
-            liftIO $ print allHeaders
-            currentMap <- liftIO $ readIORef mapBox
-            let result = Map.lookup target currentMap 
-
-            req <- request
-            let clientAddr = remoteHost req :: SockAddr
-            liftIO $ print clientAddr
-                
-            case result of
-                Just foundTarget -> redirect $ pack foundTarget
-                Nothing          -> notFoundError
-
-
-        get "/reload" $ do 
+        get "/reload" $ do
             entries <- liftIO loadDB
             let newMap = generateHashMap entries
             liftIO $ atomicWriteIORef mapBox newMap
@@ -92,8 +84,6 @@ main = do
             html page
 
         post "/add" $ do
-       
-
             key    <- formParam "key"    :: ActionM String
             target <- formParam "target" :: ActionM String
             currentMap <- liftIO $ readIORef mapBox
@@ -107,21 +97,67 @@ main = do
                     redirect "/dashboard"
                 else
                     text "Not unique"
-        get "/" $ do 
+
+        get "/delete/:key" $ do
+            key <- pathParam "key" :: ActionM String
+            liftIO $ deleteEntry key
+            liftIO $ atomicModifyIORef' mapBox $ \m -> (Map.delete key m, ())
+            redirect "/dashboard"
+
+        get "/edit/:key" $ do
+            key <- pathParam "key" :: ActionM String
+            currentMap <- liftIO $ readIORef mapBox
+            case Map.lookup key currentMap of
+                Nothing     -> redirect "/dashboard"
+                Just target -> html $ TL.pack $
+                    "<form action='/edit/" ++ key ++ "' method='POST'>\
+                    \<label>Target: <input name='target' value='" ++ target ++ "' required /></label>\
+                    \<button type='submit'>Save</button></form>"
+
+        post "/edit/:key" $ do
+            key    <- pathParam "key"    :: ActionM String
+            target <- formParam "target" :: ActionM String
+            liftIO $ updateEntry key target
+            liftIO $ atomicModifyIORef' mapBox $ \m -> (Map.insert key target m, ())
+            redirect "/dashboard"
+
+        get "/" $ do
             redirect "https://liamwittig.de"
 
-        get "/:path" $ do 
-            path    <- pathParam "path"
-            redirect $ pack ("https://liamwittig.de/" ++ path)
+        get "/:path" $ do
+            path <- pathParam "path"
+            currentMap <- liftIO $ readIORef mapBox
+            case Map.lookup path currentMap of
+                Just target -> do
+                    setHeader "Cache-Control" "public, max-age=3600"
+                    redirect $ pack target
+                Nothing     -> redirect $ pack ("https://liamwittig.de/" ++ path)
 
 
 notFoundError :: ActionM ()
-notFoundError  = do 
+notFoundError  = do
     status status404
     text $ "404 not found"
 
+checkCreds :: CheckCreds
+checkCreds u p = return $ u == "liam" && p == "1234"
 
-loadDB ::  Ord String => IO [(String, String)]
+isProtected :: Request -> Bool
+isProtected req = case pathInfo req of
+    ("dashboard":_) -> True
+    ("add":_)       -> True
+    ("reload":_)    -> True
+    ("delete":_)    -> True
+    ("edit":_)      -> True
+    _               -> False
+
+guardPath :: Middleware -> (Request -> Bool) -> Middleware
+guardPath mw predicate app req respond
+    | predicate req = mw app req respond
+    | otherwise     = app req respond
+
+
+loadDB :: IO [(String, String)]
 loadDB  = do
     conn <- open "links.db"
 
@@ -141,21 +177,33 @@ addEntry key target = do
 
     close conn
 
-isUnique :: Map String String -> String -> Bool
-isUnique mapToProve key = Map.notMember key mapToProve
+deleteEntry :: String -> IO ()
+deleteEntry key = do
+    conn <- open "links.db"
+    execute conn "DELETE FROM links WHERE key = ?" (Only (key :: String))
+    close conn
+
+updateEntry :: String -> String -> IO ()
+updateEntry key target = do
+    conn <- open "links.db"
+    execute conn "UPDATE links SET target = ? WHERE key = ?" (target :: String, key :: String)
+    close conn
+
+isUnique :: HashMap String String -> String -> Bool
+isUnique mapToProve key = not $ Map.member key mapToProve
 
 -- 2. Fixed the type signature (removed 'List' and added 'Ord String')
-generateHashMap :: Ord String => [(String, String)] -> Map String String
+generateHashMap :: [(String, String)] -> HashMap String String
 generateHashMap list = Map.fromList list
 
 
-mapToContext :: Map String String -> Aeson.Value
+mapToContext :: HashMap String String -> Aeson.Value
 mapToContext m =
     let entries = map (\(k, v) -> Aeson.object ["key" .= k, "target" .= v])
                       (Map.toList m)
     in Aeson.object ["entries" .= entries]
 
-renderDashboard :: Map String String -> IO TL.Text
+renderDashboard :: HashMap String String -> IO TL.Text
 renderDashboard m = do
     compiled <- automaticCompile ["templates"] "dashboard.html"
     case compiled of

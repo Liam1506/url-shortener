@@ -26,7 +26,7 @@
         <td><strong>{{key}}</strong></td>
         <td>{{target}}</td>
         <td>
-          <a href="/delete/{{key}}">Delete</a>
+          <a href="/delete/{{key}}" onclick="return confirm('Delete {{key}}?')">Delete</a>
           <a href="/edit/{{key}}">Edit</a>
         </td>
       </tr>
